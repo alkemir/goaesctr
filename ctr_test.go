@@ -33,8 +33,8 @@ func TestCipherEncryptDecrypt(t *testing.T) {
 	decrypter := NewCTRReaderAt(block, iv, bReader)
 
 	chunk := make([]byte, 1024)
-	for i := 0; i < (len(plaintext)/256)-4; i++ {
-		offset := i * 256
+	for i := 0; i < (len(plaintext)/257)-5; i++ {
+		offset := i * 257
 		decrypter.ReadAt(chunk, int64(offset))
 		for j := 0; j < len(chunk); j++ {
 			if chunk[j] != plaintext[offset+j] {

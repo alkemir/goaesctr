@@ -17,18 +17,20 @@ package aesctr
 import (
 	"crypto/cipher"
 	"io"
-	"sync"
 )
 
 type ctr struct {
-	b       cipher.Block
-	iv      []byte
+	b  cipher.Block
+	iv []byte
+	bs int
+
+	r io.ReaderAt
+}
+
+type ctrState struct {
 	ctr     []byte
 	out     []byte
 	outUsed int
-
-	r  io.ReaderAt
-	rl sync.Mutex
 }
 
 const streamBufferSize = 512
@@ -39,27 +41,27 @@ func NewCTRReaderAt(block cipher.Block, iv []byte, reader io.ReaderAt) io.Reader
 	if len(iv) != block.BlockSize() {
 		panic("cipher.NewCTR: IV length must equal block size")
 	}
+
 	bufSize := streamBufferSize
 	if bufSize < block.BlockSize() {
 		bufSize = block.BlockSize()
 	}
+
 	return &ctr{
-		b:       block,
-		iv:      dup(iv),
-		ctr:     dup(iv),
-		out:     make([]byte, 0, bufSize),
-		outUsed: 0,
-		r:       reader,
+		b:  block,
+		iv: dup(iv),
+		bs: bufSize,
+		r:  reader,
 	}
 }
 
-func (x *ctr) refill() {
+func (x *ctrState) refill(c *ctr) {
 	remain := len(x.out) - x.outUsed
 	copy(x.out, x.out[x.outUsed:])
 	x.out = x.out[:cap(x.out)]
-	bs := x.b.BlockSize()
+	bs := c.b.BlockSize()
 	for remain <= len(x.out)-bs {
-		x.b.Encrypt(x.out[remain:], x.ctr)
+		c.b.Encrypt(x.out[remain:], x.ctr)
 		remain += bs
 
 		// Increment counter
@@ -74,10 +76,10 @@ func (x *ctr) refill() {
 	x.outUsed = 0
 }
 
-func (x *ctr) XORKeyStream(dst, src []byte) {
+func (x *ctrState) XORKeyStream(dst, src []byte, c *ctr) {
 	for len(src) > 0 {
-		if x.outUsed >= len(x.out)-x.b.BlockSize() {
-			x.refill()
+		if x.outUsed >= len(x.out)-c.b.BlockSize() {
+			x.refill(c)
 		}
 		n := xorBytes(dst, src, x.out[x.outUsed:])
 		dst = dst[n:]
@@ -86,34 +88,33 @@ func (x *ctr) XORKeyStream(dst, src []byte) {
 	}
 }
 
-func (x *ctr) ReadAt(p []byte, off int64) (n int, err error) {
-	// Read from start of block
-	bOff := off % int64(x.b.BlockSize())
+func (c *ctr) ReadAt(p []byte, off int64) (n int, err error) {
+	// ctrState to read from start of block
+	bOff := off % int64(c.b.BlockSize())
 	bStart := off - bOff
-	bN := bStart / int64(x.b.BlockSize())
+	bN := bStart / int64(c.b.BlockSize())
 
-	x.rl.Lock()
-	defer x.rl.Unlock()
+	state := initCTR(c, bN, bOff)
 
-	x.setCTR(bN) // We could have a different buffer for each reader
-
-	n, err = x.r.ReadAt(p, off)
+	n, err = c.r.ReadAt(p, off)
 	if err != nil {
 		return
 	}
 
-	x.XORKeyStream(p, p)
+	state.XORKeyStream(p, p, c)
 	return
 }
 
-// Utility routines
-
-func (x *ctr) setCTR(bN int64) {
-	x.outUsed = 0
+func initCTR(c *ctr, bN, bOff int64) *ctrState {
+	x := &ctrState{
+		ctr:     dup(c.iv),
+		out:     make([]byte, 0, c.bs),
+		outUsed: 0,
+	}
 
 	// Fill ctr
 	// TODO (br): This can be greatly improved, it is just for correctness testing
-	copy(x.ctr, x.iv)
+	copy(x.ctr, c.iv)
 	for j := int64(0); j < bN; j++ {
 		for i := len(x.ctr) - 1; i >= 0; i-- {
 			x.ctr[i]++
@@ -123,24 +124,12 @@ func (x *ctr) setCTR(bN int64) {
 		}
 	}
 
-	// Fill out
-	remain := 0
-	bs := x.b.BlockSize()
-	for remain <= len(x.out)-bs {
-		x.b.Encrypt(x.out[remain:], x.ctr)
-		remain += bs
-
-		// Increment counter
-		for i := len(x.ctr) - 1; i >= 0; i-- {
-			x.ctr[i]++
-			if x.ctr[i] != 0 {
-				break
-			}
-		}
-	}
-
-	x.out = x.out[:remain]
+	x.refill(c)
+	x.out = x.out[bOff:]
+	return x
 }
+
+// Utility routines
 
 func dup(p []byte) []byte {
 	q := make([]byte, len(p))
