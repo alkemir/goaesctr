@@ -27,7 +27,7 @@ type ctr struct {
 	out     []byte
 	outUsed int
 
-	r  io.ReadSeeker
+	r  io.ReaderAt
 	rl sync.Mutex
 }
 
@@ -35,7 +35,7 @@ const streamBufferSize = 512
 
 // NewCTRReaderAt returns a ReaderAt which encrypts/decrypts using the given Block in
 // counter mode. The length of iv must be the same as the Block's block size.
-func NewCTRReaderAt(block cipher.Block, iv []byte, reader io.ReadSeeker) io.ReaderAt {
+func NewCTRReaderAt(block cipher.Block, iv []byte, reader io.ReaderAt) io.ReaderAt {
 	if len(iv) != block.BlockSize() {
 		panic("cipher.NewCTR: IV length must equal block size")
 	}
@@ -92,24 +92,18 @@ func (x *ctr) ReadAt(p []byte, off int64) (n int, err error) {
 	bStart := off - bOff
 	bN := bStart / int64(x.b.BlockSize())
 
-	// Because parallelism warranty of ReaderAt, we cannot have multiple
-	// readings happening at once due to seek.
 	x.rl.Lock()
 	defer x.rl.Unlock()
 
-	x.r.Seek(bStart, 0)
-	x.setCTR(bN) // We could have a different buffer for each reader, but seek is still a gamestopper.
+	x.setCTR(bN) // We could have a different buffer for each reader
 
-	for n != len(p) {
-		k, err := x.r.Read(p[n:])
-		n += k
-		if err != nil {
-			return n, err // Consumer should be aware, data is bad and thus not decrypted
-		}
+	n, err = x.r.ReadAt(p, off)
+	if err != nil {
+		return
 	}
 
 	x.XORKeyStream(p, p)
-	return n, nil
+	return
 }
 
 // Utility routines
@@ -144,7 +138,8 @@ func (x *ctr) setCTR(bN int64) {
 			}
 		}
 	}
-	x.out = x.out[:remain] // In case len(x.out) % bs != 0
+
+	x.out = x.out[:remain]
 }
 
 func dup(p []byte) []byte {
