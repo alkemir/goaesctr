@@ -113,14 +113,16 @@ func initCTR(c *ctr, bN, bOff int64) *ctrState {
 	}
 
 	// Fill ctr
-	// TODO (br): This can be greatly improved, it is just for correctness testing
 	copy(x.ctr, c.iv)
-	for j := int64(0); j < bN; j++ {
-		for i := len(x.ctr) - 1; i >= 0; i-- {
-			x.ctr[i]++
-			if x.ctr[i] != 0 {
-				break
-			}
+
+	for i := len(x.ctr) - 1; bN != 0 && i >= 0; i-- {
+		mod := byte(bN % 256)
+		bN >>= 8
+
+		tmp := x.ctr[i]
+		x.ctr[i] += mod
+		if x.ctr[i] < tmp { // carry over
+			bN++
 		}
 	}
 
